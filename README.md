@@ -1,165 +1,157 @@
-# Videoroom-To-Streaming
-## About Janode
+# README — Janus VideoRoom → Streaming (RTP Forward)
 
-Janode is a Node.js, browser compatible, adapter for the [Janus WebRTC server](https://github.com/meetecho/janus-gateway).
+Tài liệu này hướng dẫn bạn cấu hình hệ thống **Janus VideoRoom → RTP Forward → Janus Streaming** để người xem có thể xem một luồng WebRTC được phát trực tiếp trên mountpoint của Streaming.
 
-Internally uses WebSockets or Unix DGRAM Sockets to connect to Janus.
+---
 
-The library wraps the Janus core API, the Janus Admin API and some of the most popular plugins APIs.
+## 1) Mục tiêu
 
-The supported Janus plugins are:
+* Publisher (trình duyệt/ứng dụng) **join/publish** vào **VideoRoom**.
+* VideoRoom **rtp\_forward** audio/video sang **Streaming (mountpoint 7001)** qua UDP.
+* Viewer **watch/start** mountpoint và xem luồng.
 
-- EchoTest
-- AudioBridge
-- Streaming
-- VideoRoom
-- SIP
-- Record&Play
-- TextRoom (Janus API only)
+**Codec mặc định:** Opus (PT=111) + VP8 (PT=96).
+**Cổng mặc định:** Audio **6004/6005**, Video **6006/6007** (RTP/RTCP).
 
-The library is available on [npm](https://www.npmjs.com/package/janode) and the source code is on [github](https://github.com/meetecho/janode).
+---
 
-Online documentation can be found at [https://meetecho.github.io/janode](https://meetecho.github.io/janode).
-
-## Example of usage
-
-This is just a pretty simple hello world for the echotest plugin.
-Read the examples [on the git repo](https://github.com/meetecho/janode) to have some more details.
-
-
-```js
-import Janode from 'janode';
-const { Logger } = Janode;
-import EchoTestPlugin from 'janode/plugins/echotest';
-
-const connection = await Janode.connect({
-  is_admin: false,
-  address: {
-    url: 'ws://127.0.0.1:8188/',
-    apisecret: 'secret'
-  }
-});
-const session = await connection.create();
-
-// Attach to a plugin using the plugin descriptor
-const echoHandle = await session.attach(EchoTestPlugin)
-
-// Janode exports "EVENT" property with core events
-echoHandle.on(Janode.EVENT.HANDLE_WEBRTCUP, _ => Logger.info('webrtcup event'));
-echoHandle.on(Janode.EVENT.HANDLE_MEDIA, evtdata => Logger.info('media event', evtdata));
-echoHandle.on(Janode.EVENT.HANDLE_SLOWLINK, evtdata => Logger.info('slowlink event', evtdata));
-echoHandle.on(Janode.EVENT.HANDLE_HANGUP, evtdata => Logger.info('hangup event', evtdata));
-echoHandle.on(Janode.EVENT.HANDLE_DETACHED, evtdata => Logger.info('detached event', evtdata));
-
-// Refer to plugin documentation
-
-// plugins export "EVENT" property with specific plugin events
-echoHandle.on(EchoTestPlugin.EVENT.ECHOTEST_RESULT, evtdata => Logger.info('echotest result event', evtdata));
-
-// Specific method exported by the plugin
-// "offer" got from the client
-const { jsep: answer } = await echoHandle.start({ video: true, jsep: offer });
-
-// detach the handle
-await echoHandle.detach();
+## 2) Kiến trúc & luồng dữ liệu
 
 ```
-
-## Admin API example
-
-```js
-import Janode from 'janode';
-
-const admin = await Janode.connect({
-  is_admin: true,
-  address: {
-    url: 'ws://127.0.0.1:7188/',
-    apisecret: 'secret'
-  }
-});
-
-// Get the list of active sessions
-const data = await admin.listSessions();
-
+Publisher(WebRTC) ──> Janus VideoRoom ── rtp_forward (UDP) ──> Janus Streaming (mountpoint 7001)
+                                               |                    |  Audio RTP: 6004, RTCP: 6005
+                                               |                    |  Video RTP: 6006, RTCP: 6007
+                                               v                    v
+                                           UDP packets           Viewer(WebRTC)
 ```
 
-## Switching to other transports
+> Lưu ý mạng (Docker):
+>
+> * Nếu **mountpoint** bind `127.0.0.1` bên trong container Janus, thì **FWD.host** nên là `127.0.0.1` (khi VideoRoom gửi *từ trong cùng container*).
+> * Nếu bạn chạy VideoRoom **ngoài container**, đặt **FWD.host** = **IP nội bộ của container** (ví dụ `172.17.0.2`) **hoặc** tạo mountpoint với `-RtpHost 0.0.0.0`.
 
-The kind of transport used for a connection depends on the protocol/scheme defined in the `url` field of the configuration.
+---
 
-```js
-/* Use UNIX DGRAM Sockets */
-const admin = await Janode.connect({
-  is_admin: true,
-  address: {
-    url: 'file://tmp/janusapi',
-    apisecret: 'secret'
-  }
-});
-```
+## 3) Yêu cầu
 
-```js
-/* Use WebSockets */
-const admin = await Janode.connect({
-  is_admin: true,
-  address: {
-    url: 'ws://127.0.0.1:7188/',
-    apisecret: 'secret'
-  }
-});
-```
+* Docker (chạy image Janus Gateway, ví dụ `canyan/janus-gateway`).
+* Node.js 16+ cho các ví dụ server (VideoRoom/Streaming) dựa trên Janode.
+* PowerShell (Windows) để chạy script tạo mountpoint (**hoặc** dùng cURL thay thế).
+* Các cổng UDP **6004–6007** phải **không bận** trên host/container Janus.
 
-## Installation
+---
 
-Installing the library from npm is as easy as:
+## 4) Cấu hình mặc định
 
+* **Mountpoint**: `id = 7001`, `enabled = true`, `type = rtp`, `video=true`, `audio=true`.
+* **Payload types**: `video_pt = 96 (VP8/90000)`, `audio_pt = 111 (opus/48000/2)`.
+* **Cổng**: `audio_port=6004`, `audio_rtcp_port=6005`, `video_port=6006`, `video_rtcp_port=6007`.
+* **Videoroom secret** (nếu phòng yêu cầu): ví dụ `adminpwd` (phải khớp khi gửi `rtp_forward`).
+
+---
+
+## 5) Quick Start (TL;DR)
+
+1. **Chạy Janus** trong Docker.
+
+   ```bash
+   docker run -d --name janus \
+     -p 8088:8088 -p 8188:8188 \
+     -p 6004-6007:6004-6007/udp \
+     canyan/janus-gateway
+   ```
+
+2. **Tạo mountpoint 7001** (Windows PowerShell):
+
+   ```cd \tools chạy lệnh trên terminal
+   .\create_mountpoint.ps1 `
+     -JanusUrl "http://127.0.0.1:8088" `
+     -Id 7001 -Force `
+     -RtpHost "127.0.0.1" `              # hoặc "0.0.0.0"/IP container nếu cần
+     -AudioPort 6004 -AudioRtcpPort 6005 `
+     -VideoPort 6006 -VideoRtcpPort 6007
+   ```
+
+   Kỳ vọng: `Created OK.` và `list/info` thấy mountpoint **7001** với đúng codec/port.
+
+3. **kiểm tra VideoRoom** (file server của bạn):
+
+   ```js
+   const FWD = {
+     host: '127.0.0.1',     // hoặc '172.17.0.2' nếu gửi từ máy host vào container
+     audio_pt: 111,
+     video_pt: 96,
+     audio_port: 6004, audio_rtcp_port: 6005,
+     video_port: 6006, video_rtcp_port: 6007,
+   };
+   // ... trong body rtp_forward nhớ truyền secret nếu phòng yêu cầu
+   ```
+
+4. **Chạy server**:
+
+   * VideoRoom server (Node): `node index.js` (hoặc script npm tương ứng).
+   * Streaming server (Node): `node index.js`.
+
+5. **Publish & Watch**:
+
+   * Publisher join/publish vào room (VideoRoom UI/SDK).
+   * Viewer mở trang Streaming UI, `watch id=7001` → nhận `offer` → `start`.
+
+6. **Kiểm tra log**:
+
+   * VideoRoom: thấy `webrtcup`, `sending raw rtp_forward: {...6004/6006...}`, sau đó `rtp_forward REPLY: {...}`.
+   * Streaming: thấy `offer sent`, `start response sent`, `status: started`, `webrtcup`.
+
+---
+
+## 6) Chi tiết từng bước
+
+### 6.1 Kiểm tra cổng (trước khi tạo mountpoint)
 
 ```bash
-npm install janode
+# Trên Linux/Container
+ss -lun | grep -E ':6004|:6005|:6006|:6007' || echo 'All free'
 ```
 
-On the other hand, in case you got the code from git you must build the library through:
-
+### 6.2 Lấy IP container Janus (nếu cần)
 
 ```bash
-npm run build
+docker inspect janus --format '{{ .NetworkSettings.IPAddress }}'
+# ví dụ: 172.17.0.2
 ```
+### 6.3 Chạy services & kỳ vọng log
 
-## Running examples (only available from the git repo)
+* **VideoRoom**: `webrtcup` → `sending raw rtp_forward ... 6004/6006 ...` → `rtp_forward REPLY ...` → `media event receiving=true`.
+* **Streaming**: `watch received` → `offer sent` → `start received` → `status: started` → `webrtcup`.
 
-Examples are only available in the code fetched from git repo and are not published on npm.
+### 6.6 Xem stream
+
+* UI Streaming: `watch({id:7001})` → nhận `offer` (JSEP) → tạo `answer` → `start({id:7001, jsep})` → video phát.
+* Kiểm chứng dữ liệu đến mountpoint:
 
 ```bash
-cd examples/echotest
-npm run build
-npm run build-config
-node src/echotest.js --janode-log=info
+docker exec -it janus sh -lc 'tcpdump -ni any udp port 6004 or udp port 6006'
 ```
-To change the configuration edit `config.js` under `src`.
 
-## Usage in browsers
+---
+## Tham khảo lệnh nhanh
 
-Janode should work in browsers.
-You need to create a bundle with the core library and the needed plugins using a tool that can:
-- shim native node modules (e.g. `EventEmitter`)
-- import commonjs modules (some dependencies could still use that format)
-- parse the `browser` field in the `package.json`
-
-If you get the code from the repo, you can find a `rollup` bundling sample in the `bundle.sh` script under `examples/browser/`.
-The output will be a `bundle.js` script that defines an `App` global object with the members `Janode` and `EchoTestPlugin`.
-
-## How to build documentation
-
-First install the dev dependecies:
+```powershell
+# Tạo mountpoint 7001 (Windows)
+.\create_mountpoint.ps1 -JanusUrl "http://127.0.0.1:8088" -Id 7001 -Force `
+  -RtpHost "127.0.0.1" -AudioPort 6004 -AudioRtcpPort 6005 -VideoPort 6006 -VideoRtcpPort 6007
+```
 
 ```bash
-npm install
+# Lấy IP container
+docker inspect janus --format '{{ .NetworkSettings.IPAddress }}'
+
+# Theo dõi log container
+docker logs -f janus
+
+# Kiểm tra gói RTP đến mountpoint
+docker exec -it janus sh -lc 'tcpdump -ni any udp port 6004 or udp port 6006'
 ```
 
-Then use the npm script:
+---
 
-```bash
-npm run build-docs
-```
-
-Documentation in HTML format will be built under the `docs` folder.
