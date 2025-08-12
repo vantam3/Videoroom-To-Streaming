@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Janus Streaming</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f7f7fb;margin:0;padding:24px;color:#111}
+    .wrap{max-width:1000px;margin:auto}
+    .card{background:#fff;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.06);padding:16px;margin-bottom:16px}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    label{font-size:12px;color:#555}
+    input[type="text"],input[type="number"],textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:10px;font-size:14px}
+    button{border:0;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer}
+    .btn{background:#4f46e5;color:#fff}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .btn-ghost{background:#eee}
+    .grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+    .stat{background:#fafafa;border:1px solid #eee;border-radius:10px;padding:10px}
+    .muted{color:#666;font-size:12px}
+    #videos{display:flex;flex-wrap:wrap;gap:8px}
+    video{width:200px;height:120px;background:#000;border-radius:10px}
+    .note{font-size:12px;color:#666}
+    .badge{display:inline-block;background:#eef2ff;color:#3730a3;padding:3px 8px;border-radius:999px;font-size:12px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Check — <span class="badge">Streaming mountpoint</span></h1>
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>Base URL (Streaming server)</label>
+        <input id="baseUrl" type="text" value="http://localhost:4444" />
+      </div>
+      <div>
+        <label>Stream ID</label>
+        <input id="streamId" type="number" value="7001" />
+      </div>
+    </div>
+    <div class="grid-3" style="margin-top:10px">
+      <div>
+        <label>Target viewers</label>
+        <input id="target" type="number" value="20" />
+      </div>
+      <div>
+        <label>Ramp step</label>
+        <input id="step" type="number" value="5" />
+      </div>
+      <div>
+        <label>Interval (s)</label>
+        <input id="interval" type="number" value="10" />
+      </div>
+    </div>
+    <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+      <input id="renderVideo" type="checkbox" /> <label for="renderVideo">Render video element (debug)</label>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:10px">
+      <button id="startBtn" class="btn">Start ramp</button>
+      <button id="stopBtn" class="btn-ghost">Stop all</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Tổng quan</h3>
+    <div class="stats">
+      <div class="stat"><div class="muted">Created</div><div id="sCreated" style="font-size:20px;font-weight:700">0</div></div>
+      <div class="stat"><div class="muted">Started</div><div id="sStarted" style="font-size:20px;font-weight:700">0</div></div>
+      <div class="stat"><div class="muted">Failed</div><div id="sFailed" style="font-size:20px;font-weight:700">0</div></div>
+      <div class="stat"><div class="muted">Total Video (kbps)</div><div id="sTV" style="font-size:20px;font-weight:700">0</div></div>
+      <div class="stat"><div class="muted">Avg Video (kbps/viewer)</div><div id="sAV" style="font-size:20px;font-weight:700">0</div></div>
+      <div class="stat"><div class="muted">Total Audio (kbps)</div><div id="sTA" style="font-size:20px;font-weight:700">0</div></div>
+    </div>
+    <p class="note" style="margin-top:8px">Gợi ý: theo dõi thêm <code>docker stats</code> ở máy chạy Janus để biết CPU/RAM và băng thông thực.</p>
+  </div>
+
+  <div class="card">
+    <h3>Video container (tuỳ chọn hiển thị)</h3>
+    <div id="videos"></div>
+  </div>
+</div>
+
+<!-- Socket.IO client sẽ được nạp động từ Base URL khi bấm Start (hoặc dùng CDN fallback) -->
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    watchers: new Map(),
+    rampTimer: null,
+    statsTimer: null,
+    created: 0, started: 0, failed: 0,
+    running: false,
+    ioReady: false,
+  };
+
+  function setText(id, v){ $(id).textContent = v; }
+  function uiUpdate(){
+    setText('sCreated', state.created);
+    setText('sStarted', state.started);
+    setText('sFailed', state.failed);
+  }
+
+  function loadSocketIo(baseUrl){
+    return new Promise((resolve) => {
+      if (window.io) return resolve(true);
+      const s = document.createElement('script');
+      s.src = baseUrl.replace(/\/$/, '') + '/socket.io/socket.io.js';
+      s.onload = () => { state.ioReady = true; resolve(true); };
+      s.onerror = () => {
+        // Fallback CDN (nếu server không phục vụ file client)
+        const c = document.createElement('script');
+        c.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
+        c.onload = () => { state.ioReady = true; resolve(true); };
+        c.onerror = () => resolve(false);
+        document.body.appendChild(c);
+      };
+      document.body.appendChild(s);
+    });
+  }
+
+  async function startRamp(){
+    if (state.running) return;
+    state.running = true;
+    state.created = state.started = state.failed = 0;
+    uiUpdate();
+
+    const baseUrl = $('baseUrl').value.trim();
+    const ok = await loadSocketIo(baseUrl);
+    if (!ok){ alert('Không tải được socket.io-client'); state.running=false; return; }
+
+    // Clear cũ
+    stopAll(true);
+    state.running = true;
+
+    const target = Number($('target').value)||0;
+    const step = Number($('step').value)||1;
+    const interval = Math.max(1, Number($('interval').value)||5);
+
+    let spawned = 0;
+    const spawnBatch = () => {
+      const need = Math.min(step, target - spawned);
+      for (let i=0;i<need;i++) createWatcher(spawned+i);
+      spawned += need;
+      if (spawned >= target){ clearInterval(state.rampTimer); state.rampTimer=null; }
+    };
+
+    spawnBatch();
+    state.rampTimer = setInterval(spawnBatch, interval*1000);
+
+    if (state.statsTimer) clearInterval(state.statsTimer);
+    state.statsTimer = setInterval(runStats, 2000);
+  }
+
+  function stopAll(silent){
+    if (state.rampTimer){ clearInterval(state.rampTimer); state.rampTimer=null; }
+    if (state.statsTimer){ clearInterval(state.statsTimer); state.statsTimer=null; }
+    state.watchers.forEach((w)=>{ cleanupWatcher(w); });
+    state.watchers.clear();
+    if (!silent) state.running=false;
+  }
+
+  function cleanupWatcher(w){
+    try { w.socket?.off('offer', w._onOffer); } catch{}
+    try { w.socket?.off('started', w._onStarted); } catch{}
+    try { w.socket?.off('streaming-error', w._onError); } catch{}
+    try { w.socket?.disconnect(); } catch{}
+    try { w.pc?.close(); } catch{}
+    if (w.videoEl && w.videoEl.parentNode) w.videoEl.parentNode.removeChild(w.videoEl);
+    w.status='closed';
+  }
+
+  function createWatcher(id){
+    const baseUrl = $('baseUrl').value.trim();
+    const streamId = Number($('streamId').value)||7001;
+    const renderVideo = $('renderVideo').checked;
+
+    const socket = window.io(baseUrl, { transports:['websocket'], withCredentials:false, forceNew:true });
+    const pc = new RTCPeerConnection({ iceServers: [] });
+
+    const w = { id, socket, pc, status:'connecting', lastTs:0, lastVB:0, lastAB:0, vkbps:0, akbps:0, videoEl:null };
+
+    if (renderVideo){
+      const v = document.createElement('video');
+      v.autoplay=true; v.muted=true; v.playsInline=true;
+      $('videos').appendChild(v);
+      w.videoEl = v;
+    }
+
+    pc.ontrack = (ev)=>{ if (w.videoEl) { w.videoEl.srcObject = ev.streams[0]; } };
+    pc.onicecandidate = (ev)=>{
+      if (ev.candidate) socket.emit('trickle', { data: { feed: 0, candidate: ev.candidate } });
+      else socket.emit('trickle-complete', { data: { feed: 0 } });
+    };
+
+    w._onOffer = async ({data}) => {
+      try{
+        await pc.setRemoteDescription(data.jsep);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('start', { data: { id: streamId, jsep: answer } });
+      }catch(e){ fail(e); }
+    };
+    w._onStarted = () => {
+      if (w.status!== 'started'){ w.status='started'; state.started++; uiUpdate(); }
+    };
+    w._onError = (e) => fail(new Error(typeof e==='string'?e:JSON.stringify(e)));
+
+    function fail(e){
+      if (w.status==='failed' || w.status==='closed') return;
+      w.status='failed'; state.failed++; uiUpdate(); cleanupWatcher(w);
+      console.warn('[watcher'+id+'] fail:', e?.message||e);
+    }
+
+    socket.on('connect', ()=>{ socket.emit('watch', { data: { id: streamId } }); });
+    socket.on('offer', w._onOffer);
+    socket.on('started', w._onStarted);
+    socket.on('streaming-error', w._onError);
+    socket.on('disconnect', ()=>{ if (w.status!=='started') fail('socket disconnected'); });
+
+    state.watchers.set(id, w);
+    state.created++; uiUpdate();
+  }
+
+  async function runStats(){
+    let tv=0, ta=0, startedCount=0;
+    const entries = Array.from(state.watchers.values());
+    for (const w of entries){
+      if (w.status!== 'started') continue;
+      startedCount++;
+      try{
+        const stats = await w.pc.getStats();
+        let vB=0,aB=0, ts=0;
+        stats.forEach((r)=>{
+          if (r.type==='inbound-rtp' && !r.isRemote){
+            const kind = r.kind || r.mediaType;
+            if (kind==='video') vB += r.bytesReceived||0;
+            if (kind==='audio') aB += r.bytesReceived||0;
+            ts = Math.max(ts, r.timestamp||0);
+          }
+        });
+        if (w.lastTs && ts>w.lastTs){
+          const dt = (ts - w.lastTs)/1000;
+          const vkbps = dt>0 ? ((vB - w.lastVB)*8)/1000/dt : 0;
+          const akbps = dt>0 ? ((aB - w.lastAB)*8)/1000/dt : 0;
+          w.vkbps=vkbps; w.akbps=akbps; tv+=vkbps; ta+=akbps;
+        }
+        w.lastVB=vB; w.lastAB=aB; w.lastTs=ts;
+      }catch(_){ /* ignore */ }
+    }
+    document.getElementById('sTV').textContent = tv.toFixed(0);
+    document.getElementById('sTA').textContent = ta.toFixed(0);
+    const avg = startedCount? (tv/startedCount).toFixed(0) : 0;
+    document.getElementById('sAV').textContent = avg;
+  }
+
+  $('startBtn').addEventListener('click', startRamp);
+  $('stopBtn').addEventListener('click', ()=> stopAll());
+
+})();
+</script>
+</body>
+</html>

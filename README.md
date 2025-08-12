@@ -89,8 +89,9 @@ Publisher(WebRTC) ──> Janus VideoRoom ── rtp_forward (UDP) ──> Janus
 
 4. **Chạy server**:
 
-   * VideoRoom server (Node): `node index.js` (hoặc script npm tương ứng).
-   * Streaming server (Node): `node index.js`.
+   * cd vào thư mục VideoRoom server (Node): `node index.js` (hoặc script npm tương ứng).
+   * cd vào thư mục Streaming server (Node): `node index.js`.
+   * sau khi chạy thành công nếu có chạy tool check viewer thì truy cập: `http://localhost:4444/janode/check.html`.Điều chỉnh tham số rồi start
 
 5. **Publish & Watch**:
 
