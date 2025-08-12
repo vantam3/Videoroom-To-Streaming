@@ -26,6 +26,16 @@ const httpServer = (options.key && options.cert) ? createHttpsServer(options, ap
 import { Server } from 'socket.io';
 const io = new Server(httpServer);
 
+// === RTP forward target (khớp mountpoint 7001 bên Streaming) ===
+const FWD = {
+  host: '127.0.0.1',    // Janus (videoroom) gửi RTP đến loopback của container => Streaming đang bind 127.0.0.1 sẽ nhận
+  audio_pt: 111,        // Opus
+  video_pt: 96,         // VP8
+  audio_port: 6004, audio_rtcp_port: 6005,  
+  video_port: 6006, video_rtcp_port: 6007,
+};
+
+
 const scheduleBackEndConnection = (function () {
   let task = null;
 
@@ -47,11 +57,8 @@ let janodeSession;
 let janodeManagerHandle;
 
 (function main() {
-
   initFrontEnd().catch(({ message }) => Logger.error(`${LOG_NS} failure initializing front-end: ${message}`));
-
   scheduleBackEndConnection(1);
-
 })();
 
 async function initBackEnd() {
@@ -68,9 +75,7 @@ async function initBackEnd() {
 
     connection.once(Janode.EVENT.CONNECTION_ERROR, error => {
       Logger.error(`${LOG_NS} connection with Janus error: ${error.message}`);
-
       replyError(io, 'backend-failure');
-
       scheduleBackEndConnection();
     });
 
@@ -95,10 +100,7 @@ async function initBackEnd() {
   catch (error) {
     Logger.error(`${LOG_NS} Janode setup error: ${error.message}`);
     if (connection) connection.close().catch(() => { });
-
-    // notify clients
     replyError(io, 'backend-failure');
-
     throw error;
   }
 }
@@ -173,11 +175,20 @@ function initFrontEnd() {
 
         pubHandle.on(VideoRoomPlugin.EVENT.VIDEOROOM_UNPUBLISHED, async evtdata => {
           const handle = clientHandles.getHandleByFeed(evtdata.feed);
-          if (handle.feed !== pubHandle.feed) {
+          if (handle && handle.feed !== pubHandle.feed) {
             clientHandles.removeHandleByFeed(evtdata.feed);
             await handle.detach().catch(() => { });
           }
           replyEvent(socket, 'unpublished', evtdata);
+          try {
+            await janodeManagerHandle.stopForward({
+              room: Number(joindata.room ?? evtdata.room ?? 0),
+              publisher_id: Number(evtdata.feed)
+            });
+            Logger.info(`${LOG_NS} rtp_forward STOPPED (unpublish) for pub ${evtdata.feed}`);
+          } catch (e) {
+            Logger.warn(`${LOG_NS} rtp_forward stop WARN (unpublish) for pub ${evtdata.feed}: ${e?.message || e}`);
+          }
         });
 
         pubHandle.on(VideoRoomPlugin.EVENT.VIDEOROOM_LEAVING, async evtdata => {
@@ -185,6 +196,15 @@ function initFrontEnd() {
           clientHandles.removeHandleByFeed(evtdata.feed);
           if (handle) await handle.detach().catch(() => { });
           replyEvent(socket, 'leaving', evtdata);
+          try {
+            await janodeManagerHandle.stopForward({
+              room: Number(joindata.room ?? evtdata.room ?? 0),
+              publisher_id: Number(evtdata.feed)
+            });
+            Logger.info(`${LOG_NS} rtp_forward STOPPED (leaving) for pub ${evtdata.feed}`);
+          } catch (e) {
+            Logger.warn(`${LOG_NS} rtp_forward stop WARN (leaving) for pub ${evtdata.feed}: ${e?.message || e}`);
+          }
         });
 
         pubHandle.on(VideoRoomPlugin.EVENT.VIDEOROOM_DISPLAY, evtdata => {
@@ -213,11 +233,85 @@ function initFrontEnd() {
         });
         pubHandle.on(Janode.EVENT.HANDLE_TRICKLE, evtdata => Logger.info(`${LOG_NS} ${pubHandle.name} trickle event ${JSON.stringify(evtdata)}`));
 
-        const response = await pubHandle.joinPublisher(joindata);
+const response = await pubHandle.joinPublisher(joindata);
+replyEvent(socket, 'joined', response, _id);
+Logger.info(`${LOG_NS} ${remote} joined sent`);
 
-        replyEvent(socket, 'joined', response, _id);
 
-        Logger.info(`${LOG_NS} ${remote} joined sent`);
+const roomId = Number(joindata?.room ?? response?.room ?? 0);
+let publisherId = (response && response.id != null) ? Number(response.id) : null;
+
+
+if (!publisherId && pubHandle && pubHandle.feed != null) {
+  publisherId = Number(pubHandle.feed);
+}
+
+// Log để kiểm tra
+Logger.info(`${LOG_NS} joinPublisher response: ${JSON.stringify(response)}`);
+Logger.info(`${LOG_NS} resolved prelim roomId=${roomId} publisherId=${publisherId} feed=${pubHandle?.feed}`);
+
+async function resolvePublisherIdViaList() {
+  try {
+    const list = await janodeManagerHandle.listParticipants({ room: roomId });
+    const participants = list?.participants || [];
+    // Ưu tiên tìm đúng display nếu client có set
+    let mine = joindata?.display
+      ? participants.find(p => p.display === joindata.display && p.publisher)
+      : null;
+    if (!mine) {
+      // fallback: lấy participant publisher mới nhất (thường là mình)
+      mine = participants.filter(p => p.publisher).sort((a,b)=>b.id-a.id)[0];
+    }
+    return mine?.id ? Number(mine.id) : null;
+  } catch (e) {
+    Logger.warn(`${LOG_NS} listParticipants fallback failed: ${e?.message || e}`);
+    return null;
+  }
+}
+if (!publisherId) {
+  publisherId = await resolvePublisherIdViaList();
+  Logger.info(`${LOG_NS} fallback publisherId=${publisherId}`);
+}
+
+pubHandle.once(Janode.EVENT.HANDLE_WEBRTCUP, async () => {
+  try {
+    if (!roomId || !publisherId || Number.isNaN(publisherId)) {
+      Logger.error(`${LOG_NS} rtp_forward ABORT: invalid ids room=${roomId} pub=${publisherId}`);
+      return;
+    }
+
+    // Gọi trực tiếp message tới videoroom
+    const body = {
+      request: 'rtp_forward',
+      room: Number(roomId),
+      publisher_id: Number(publisherId),
+      host: FWD.host,
+      audio_port: Number(FWD.audio_port),
+      video_port: Number(FWD.video_port),
+      audio_rtcp_port: Number(FWD.audio_rtcp_port),
+      video_rtcp_port: Number(FWD.video_rtcp_port),
+      audio_pt: Number(FWD.audio_pt),
+      video_pt: Number(FWD.video_pt),
+      // nếu room có cấu hình cần "secret"/"admin_key", thêm vào đây:
+      secret: 'adminpwd',
+      // admin_key: 'youradminkey',
+    };
+
+    Logger.info(`${LOG_NS} sending raw rtp_forward: ${JSON.stringify(body)}`);
+
+    // Dùng manager handle (hoặc pubHandle đều được, nhưng manager là chuẩn)
+    const res = await janodeManagerHandle.message(body);
+
+    Logger.info(`${LOG_NS} rtp_forward REPLY: ${JSON.stringify(res)}`);
+    Logger.info(`${LOG_NS} rtp_forward STARTED for pub ${publisherId}`);
+  } catch (e) {
+    Logger.error(`${LOG_NS} rtp_forward ERROR (raw): ${e?.message || e}`);
+  }
+});
+
+
+
+
       } catch ({ message }) {
         if (pubHandle) await pubHandle.detach().catch(() => { });
         replyError(socket, message, joindata, _id);
@@ -247,7 +341,6 @@ function initFrontEnd() {
         });
         subHandle.on(Janode.EVENT.HANDLE_TRICKLE, evtdata => Logger.info(`${LOG_NS} ${subHandle.name} trickle event ${JSON.stringify(evtdata)}`));
 
-
         // specific videoroom events
         subHandle.on(VideoRoomPlugin.EVENT.VIDEOROOM_SC_SUBSTREAM_LAYER, evtdata => Logger.info(`${LOG_NS} ${subHandle.name} simulcast substream layer switched to ${evtdata.sc_substream_layer}`));
         subHandle.on(VideoRoomPlugin.EVENT.VIDEOROOM_SC_TEMPORAL_LAYERS, evtdata => Logger.info(`${LOG_NS} ${subHandle.name} simulcast temporal layers switched to ${evtdata.sc_temporal_layers}`));
@@ -262,38 +355,57 @@ function initFrontEnd() {
       }
     });
 
-    socket.on('publish', async (evtdata = {}) => {
-      Logger.info(`${LOG_NS} ${remote} publish received`);
-      const { _id, data: pubdata = {} } = evtdata;
+    // =======================
+// Publish handler
+// =======================
+socket.on('publish', async (evtdata = {}) => {
+  Logger.info(`${LOG_NS} ${remote} publish received`);
+  const { _id, data: pubdata = {} } = evtdata;
 
-      const handle = clientHandles.getHandleByFeed(pubdata.feed);
-      if (!checkSessions(janodeSession, handle, socket, evtdata)) return;
+  const handle = clientHandles.getHandleByFeed(pubdata.feed);
+  if (!checkSessions(janodeSession, handle, socket, evtdata)) return;
 
-      try {
-        const response = await handle.publish(pubdata);
-        replyEvent(socket, 'published', response, _id);
-        Logger.info(`${LOG_NS} ${remote} published sent`);
-      } catch ({ message }) {
-        replyError(socket, message, pubdata, _id);
-      }
-    });
+  try {
+    // Force VP8 if not provided
+    if (!pubdata.video_codec) {
+      pubdata.video_codec = 'vp8';
+      Logger.info(`${LOG_NS} forcing video_codec=vp8 for publish feed=${pubdata.feed}`);
+    }
 
-    socket.on('configure', async (evtdata = {}) => {
-      Logger.info(`${LOG_NS} ${remote} configure received`);
-      const { _id, data: confdata = {} } = evtdata;
+    const response = await handle.publish(pubdata);
+    replyEvent(socket, 'published', response, _id);
+    Logger.info(`${LOG_NS} ${remote} published sent`);
+  } catch ({ message }) {
+    replyError(socket, message, pubdata, _id);
+  }
+});
 
-      const handle = clientHandles.getHandleByFeed(confdata.feed);
-      if (!checkSessions(janodeSession, handle, socket, evtdata)) return;
+// =======================
+// Configure handler
+// =======================
+socket.on('configure', async (evtdata = {}) => {
+  Logger.info(`${LOG_NS} ${remote} configure received`);
+  const { _id, data: confdata = {} } = evtdata;
 
-      try {
-        const response = await handle.configure(confdata);
-        delete response.configured;
-        replyEvent(socket, 'configured', response, _id);
-        Logger.info(`${LOG_NS} ${remote} configured sent`);
-      } catch ({ message }) {
-        replyError(socket, message, confdata, _id);
-      }
-    });
+  const handle = clientHandles.getHandleByFeed(confdata.feed);
+  if (!checkSessions(janodeSession, handle, socket, evtdata)) return;
+
+  try {
+    // Force VP8 if not provided
+    if (!confdata.video_codec) {
+      confdata.video_codec = 'vp8';
+      Logger.info(`${LOG_NS} forcing video_codec=vp8 for configure feed=${confdata.feed}`);
+    }
+
+    const response = await handle.configure(confdata);
+    delete response.configured; // Giữ nguyên behavior cũ
+    replyEvent(socket, 'configured', response, _id);
+    Logger.info(`${LOG_NS} ${remote} configured sent`);
+  } catch ({ message }) {
+    replyError(socket, message, confdata, _id);
+  }
+});
+
 
     socket.on('unpublish', async (evtdata = {}) => {
       Logger.info(`${LOG_NS} ${remote} unpublish received`);
@@ -406,16 +518,13 @@ function initFrontEnd() {
     // socket disconnection event
     socket.on('disconnect', async () => {
       Logger.info(`${LOG_NS} ${remote} disconnected socket`);
-
       await clientHandles.leaveAll();
       await clientHandles.detachAll();
     });
 
-
     /*----------------*/
     /* Management API */
     /*----------------*/
-
 
     socket.on('list-participants', async (evtdata = {}) => {
       Logger.info(`${LOG_NS} ${remote} list_participants received`);
@@ -581,16 +690,15 @@ function initFrontEnd() {
 
   // http server binding
   return new Promise((resolve, reject) => {
-    // web server binding
+    const bindAddr = serverConfig.bind || '0.0.0.0';
     httpServer.listen(
       serverConfig.port,
-      serverConfig.bind,
+      bindAddr,
       () => {
-        Logger.info(`${LOG_NS} server listening on ${(options.key && options.cert) ? 'https' : 'http'}://${serverConfig.bind}:${serverConfig.port}/janode`);
+        Logger.info(`${LOG_NS} server listening on ${(options.key && options.cert) ? 'https' : 'http'}://${bindAddr}:${serverConfig.port}/janode`);
         resolve();
       }
     );
-
     httpServer.on('error', e => reject(e));
   });
 }
@@ -608,20 +716,14 @@ function checkSessions(session, handle, socket, { data, _id }) {
 }
 
 function replyEvent(socket, evtname, data, _id) {
-  const evtdata = {
-    data,
-  };
+  const evtdata = { data };
   if (_id) evtdata._id = _id;
-
   socket.emit(evtname, evtdata);
 }
 
 function replyError(socket, message, request, _id) {
-  const evtdata = {
-    error: message,
-  };
+  const evtdata = { error: message };
   if (request) evtdata.request = request;
   if (_id) evtdata._id = _id;
-
   socket.emit('videoroom-error', evtdata);
 }

@@ -7,7 +7,7 @@ const RTCPeerConnection = (window.RTCPeerConnection || window.webkitRTCPeerConne
 
 let streamingPeerConnection;
 const remoteVideo = document.getElementById('remoteVideo');
-const myStream = parseInt(getURLParameter('stream')) || 1;
+const myStream = parseInt(getURLParameter('stream')) || 7001;
 const myPin = getURLParameter('pin') || null;
 
 let decoder;
@@ -328,23 +328,40 @@ async function doAnswer(offer) {
         closePC();
       }
     };
-    pc.ontrack = event => {
-      console.log('pc.ontrack', event);
+    pc.ontrack = (event) => {
+  const stream = event.streams[0];
+  const track  = event.track;
+  console.log('pc.ontrack', track.kind, track.id, stream?.id);
 
-      event.track.onunmute = evt => {
-        console.log('track.onunmute', evt);
-        /* TODO set srcObject in this callback */
-      };
-      event.track.onmute = evt => {
-        console.log('track.onmute', evt);
-      };
-      event.track.onended = evt => {
-        console.log('track.onended', evt);
-      };
+  const attach = () => {
+    if (!remoteVideo) return;
+    if (remoteVideo.srcObject !== stream) {
+      remoteVideo.srcObject = stream;
+      // đảm bảo autoplay không bị chặn
+      remoteVideo.muted = true;
+      remoteVideo.autoplay = true;
+      remoteVideo.playsInline = true;
+      remoteVideo.setAttribute('muted', '');
+      remoteVideo.setAttribute('playsinline', '');
+    }
+    remoteVideo.play().catch(err => {
+      console.log('video.play blocked:', err?.message || err);
+    });
+  };
 
-      const remoteStream = event.streams[0];
-      setVideoElement(remoteStream);
-    };
+  track.onunmute = () => {
+    console.log('track.onunmute');
+    attach();
+  };
+
+  track.onmute = (e) => console.log('track.onmute', e);
+  track.onended = (e) => console.log('track.onended', e);
+
+  if (!track.muted) {
+    attach();
+  }
+};
+
 
     streamingPeerConnection = pc;
   }

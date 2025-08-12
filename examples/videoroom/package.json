@@ -19,7 +19,8 @@
   "private": true,
   "main": "src/index.js",
   "dependencies": {
-    "express": "^4.13.4",
+    "express": "^4.21.2",
+    "isomorphic-ws": "^5.0.0",
     "socket.io": "^4.2.0"
   },
   "scripts": {
