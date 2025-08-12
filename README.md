@@ -89,8 +89,8 @@ Publisher(WebRTC) ──> Janus VideoRoom ── rtp_forward (UDP) ──> Janus
 
 4. **Chạy server**:
 
-   * cd vào thư mục VideoRoom server (Node): `node index.js` (hoặc script npm tương ứng).
-   * cd vào thư mục Streaming server (Node): `node index.js`.
+   * cd vào thư mục VideoRoom server (Node): `node index.js` , truy cập `http://localhost:4443/janode/index.html`.
+   * cd vào thư mục Streaming server (Node): `node index.js`, truy cập `http://localhost:4444/janode/?stream=7001`.
    * sau khi chạy thành công nếu có chạy tool check viewer thì truy cập: `http://localhost:4444/janode/check.html`.Điều chỉnh tham số rồi start
 
 5. **Publish & Watch**:
@@ -144,9 +144,6 @@ docker exec -it janus sh -lc 'tcpdump -ni any udp port 6004 or udp port 6006'
 ```
 
 ```bash
-# Lấy IP container
-docker inspect janus --format '{{ .NetworkSettings.IPAddress }}'
-
 # Theo dõi log container
 docker logs -f janus
 
